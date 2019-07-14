@@ -13,7 +13,6 @@
 .git
 .gitignore
 
-gcp-development-service-account.json
 Makefile
 
 node_modules

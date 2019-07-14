@@ -4,17 +4,19 @@ import (
 	"context"
 	"fmt"
 	"google.golang.org/api/compute/v1"
-	"google.golang.org/api/option"
 	"log"
 	"strings"
 	"time"
 )
 
+type Marshaller interface {
+	MarshalJSON() ([]byte, error)
+}
+
 type Function struct {
 	Project              string
 	Zone                 string
 	GroupManagerSelector string
-	AuthPath             string
 	computeService       *compute.Service
 }
 
@@ -33,11 +35,7 @@ func (f Function) Exec() error {
 	var err error
 
 	ctx := context.Background()
-	if f.AuthPath == "" {
-		f.computeService, err = compute.NewService(ctx)
-	} else {
-		f.computeService, err = compute.NewService(ctx, option.WithCredentialsFile(f.AuthPath))
-	}
+	f.computeService, err = compute.NewService(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,10 +69,20 @@ func (f Function) Exec() error {
 	for _, instance := range instancesResponse.ManagedInstances {
 		instanceParts := strings.Split(instance.Instance, "/")
 		instanceName := instanceParts[len(instanceParts)-1]
+		previousStatus := ""
 		instance, err := f.computeService.Instances.Get(f.Project, f.Zone, instanceName).Context(ctx).Do()
 		if err != nil {
 			log.Fatal(err)
 		}
+
+		// Find the previous status of the instance
+		for _, metadata := range instance.Metadata.Items {
+			if metadata.Key == "preemptivectl" {
+				previousStatus = *metadata.Value
+			}
+		}
+
+		f.setInstanceMetadata(instance, "preemptivectl", "")
 
 		fmt.Println(fmt.Sprintf("Working on instance %s", instanceName))
 
@@ -89,18 +97,26 @@ func (f Function) Exec() error {
 
 		fmt.Println(fmt.Sprintf("Age (m): %f - Day (m): %d - Expiration (m): %f", age.Minutes(), dayInMinutes, minutesUntilExpiration))
 
-		if minutesUntilExpiration < 35 {
-			fmt.Println(fmt.Sprintf("Adding a new instance (%s) to the instance group manager (%s)", instanceName, instanceGroupManager.Name))
+		if previousStatus == "" && minutesUntilExpiration < 35 {
+			fmt.Println(fmt.Sprintf("Adding a new instance (%s) to the instance group manager (%s)", instance.Name, instanceGroupManager.Name))
 			fmt.Println(fmt.Sprintf("Resizing instance group manager (%s) target size from %d to %d", instanceGroupManager.Name, instanceGroupManager.TargetSize, instanceGroupManager.TargetSize+1))
+
+			f.setInstanceMetadata(instance, "preemptivectl", "initiated-group-manager-resize")
+
 			instancesChanged += 1
-		} else if minutesUntilExpiration < 20 {
-			fmt.Println(fmt.Sprintf("Time to cordon/drain this instance (%s) assigned to the instance group manager (%s)", instanceName, instanceGroupManager.Name))
+		} else if previousStatus == "initiated-group-manager-resize" && minutesUntilExpiration < 20 {
+			fmt.Println(fmt.Sprintf("Time to cordon/drain this instance (%s) assigned to the instance group manager (%s)", instance.Name, instanceGroupManager.Name))
+
+			f.setInstanceMetadata(instance, "preemptivectl", "instance-drained")
+
 			instancesChanged += 1
-		} else if minutesUntilExpiration < 10 {
-			fmt.Println(fmt.Sprintf("Abandoning instance (%s) from the instance group manager (%s)", instanceName, instanceGroupManager.Name))
-			fmt.Println(fmt.Sprintf("Abandoning instance (%s) from the instance group manager (%s)", instanceName, instanceGroupManager.Name))
+		} else if previousStatus == "instance-drained" && minutesUntilExpiration < 10 {
+			fmt.Println(fmt.Sprintf("Abandoning instance (%s) from the instance group manager (%s)", instance.Name, instanceGroupManager.Name))
+			fmt.Println(fmt.Sprintf("Abandoning instance (%s) from the instance group manager (%s)", instance.Name, instanceGroupManager.Name))
+
+			f.setInstanceMetadata(instance, "preemptivectl", "complete")
 		} else {
-			fmt.Println(fmt.Sprintf("Instance (%s) from the instance group manager (%s) requires no action", instanceName, instanceGroupManager.Name))
+			fmt.Println(fmt.Sprintf("Instance (%s) from the instance group manager (%s) requires no action", instance.Name, instanceGroupManager.Name))
 		}
 	}
 
@@ -111,6 +127,31 @@ func (f Function) Exec() error {
 	}
 
 	return nil
+}
+
+// setInstanceMetadata will add a new instance metadata key to the specified instance
+func (f Function) setInstanceMetadata(instance *compute.Instance, key, value string) {
+	foundKey := false
+	for _, metadataItem := range instance.Metadata.Items {
+		if metadataItem.Key == key {
+			metadataItem.Value = &value
+			foundKey = true
+		}
+	}
+
+	if !foundKey {
+		instance.Metadata.Items = append(instance.Metadata.Items, &compute.MetadataItems{
+			Key: key,
+			Value: &value,
+		})
+	}
+
+	operation, err := f.computeService.Instances.SetMetadata(f.Project, f.Zone, instance.Name, instance.Metadata).Do()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	f.printJson(operation)
 }
 
 // resizeManagedInstances will change the number of instances within the InstanceGroupManager.
@@ -131,6 +172,15 @@ func (f Function) drainKubernetesNode(instanceGroupManager *compute.InstanceGrou
 
 func (f Function) abandonInstance(instanceGroupManager *compute.InstanceGroupManager, instanceName string) error {
 	return nil
+}
+
+func (f Function) printJson(v Marshaller) {
+	json, err := v.MarshalJSON()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(string(json))
 }
 
 // run is used by google cloud to kick off the function

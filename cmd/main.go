@@ -7,7 +7,6 @@ func main() {
 		Project: "brennon-loveless",
 		Zone: "us-central1-a",
 		GroupManagerSelector: "demon-k8s",
-		AuthPath: "./gcp-development-service-account.json",
 	}
 
 	function.Exec()
