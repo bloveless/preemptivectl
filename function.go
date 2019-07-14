@@ -82,8 +82,6 @@ func (f Function) Exec() error {
 			}
 		}
 
-		f.setInstanceMetadata(instance, "preemptivectl", "")
-
 		fmt.Println(fmt.Sprintf("Working on instance %s", instanceName))
 
 		createdTimestamp, err := time.Parse("2006-01-02T15:04:05-07:00", instance.CreationTimestamp)
